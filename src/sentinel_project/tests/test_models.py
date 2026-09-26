@@ -1,8 +1,4 @@
-from sentinel.models import (
-    Message,
-    TargetRequest,
-    TargetResponse
-)
+from sentinel.models import Message, TargetRequest, TargetResponse
 
 
 def test_target_request():

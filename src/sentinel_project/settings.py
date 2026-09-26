@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     target_model: str = "gpt-4.1-mini"
     agent_model: str = "gpt-4.1-mini"
+    target_input_cost_per_million: float = 0.4
+    target_output_cost_per_million: float = 1.6
+    agent_input_cost_per_million: float = 0.4
+    agent_output_cost_per_million: float = 1.6
     database_url: str = "sqlite:///./sentinel.db"
     chroma_path: str = "./data/chroma"
 

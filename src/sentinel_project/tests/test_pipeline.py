@@ -1,6 +1,8 @@
 from sentinel_project.evaluation.evaluator import evaluate_policy_response
+from sentinel_project.retrieval.policies import load_policy_documents
 from sentinel_project.retrieval.retrieval import (
     ChromaPolicyRetriever,
+    chunk_documents_by_words,
     chunk_policy_documents,
     retrieve_policy_documents,
     sanitize_retrieved_chunk,
@@ -12,7 +14,10 @@ def test_retrieve_policy_documents_returns_relevant_policies():
 
     assert docs
     assert len(docs) == 4
-    assert any(doc["doc_id"].startswith("policy") for doc in docs)
+    assert any(
+        doc["doc_id"] in {"clean_accessibility", "clean_records", "clean_benefits"}
+        for doc in docs
+    )
     assert docs[0]["score"] >= 0
     assert [doc["rank"] for doc in docs] == [1, 2, 3, 4]
     assert all(doc["chunk_id"] for doc in docs)
@@ -32,6 +37,38 @@ def test_policy_chunker_uses_sentence_overlap():
     assert len(chunks) == 2
     assert chunks[0]["text"].endswith("Sentence two.")
     assert chunks[1]["text"].startswith("Sentence two.")
+
+
+def test_word_chunk_experiment_respects_size_and_overlap():
+    documents = [{
+        "doc_id": "long-doc",
+        "title": "Long document",
+        "text": " ".join(f"word-{index}" for index in range(700)),
+    }]
+    chunks = chunk_documents_by_words(documents, chunk_size=256, overlap=32)
+
+    assert len(chunks) == 3
+    assert max(len(chunk["text"].split()) for chunk in chunks) <= 256
+    assert chunks[0]["text"].split()[-32:] == chunks[1]["text"].split()[:32]
+
+
+def test_seeded_corpus_matches_required_counts_and_word_lengths():
+    documents = load_policy_documents()
+    clean = [doc for doc in documents if doc["restricted"] == "false" and doc["poisoned"] == "false"]
+    restricted = [
+        doc
+        for doc in documents
+        if doc["restricted"] == "true"
+        and doc["poisoned"] == "false"
+        and not doc["doc_id"].startswith("employee_record_")
+    ]
+    employee_records = [doc for doc in documents if doc["doc_id"].startswith("employee_record_")]
+    poisoned = [doc for doc in documents if doc["poisoned"] == "true"]
+
+    assert (len(documents), len(clean), len(restricted), len(employee_records), len(poisoned)) == (35, 20, 5, 2, 8)
+    assert min(len(doc["text"].split()) for doc in clean) >= 500
+    assert max(len(doc["text"].split()) for doc in clean) <= 1500
+    assert len({doc["injection_style"] for doc in poisoned}) == 8
 
 
 def test_hardened_chunk_sanitizer_removes_injected_commands_only():
@@ -83,7 +120,7 @@ def test_chroma_retriever_sanitizes_poisoned_chunk_in_hardened_mode():
         def __init__(self):
             self.collection = MemoryCollection()
 
-        def get_or_create_collection(self, name, metadata):
+        def get_or_create_collection(self, name, metadata, embedding_function=None):
             return self.collection
 
     retriever = ChromaPolicyRetriever("unused", client=MemoryClient())

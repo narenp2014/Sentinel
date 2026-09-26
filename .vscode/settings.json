@@ -1,6 +1,7 @@
 {
     "chat.tools.terminal.autoApprove": {
         "Test-Path": true,
-        "&": true
+        "&": true,
+        "Get-Command": true
     }
 }

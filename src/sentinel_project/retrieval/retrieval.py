@@ -104,6 +104,9 @@ def chunk_policy_documents(
                     "doc_id": document["doc_id"],
                     "title": document["title"],
                     "text": text,
+                    "restricted": document.get("restricted", "false"),
+                    "poisoned": document.get("poisoned", "false"),
+                    "injection_style": document.get("injection_style", ""),
                 }
             )
 
@@ -130,11 +133,17 @@ class ChromaPolicyRetriever:
         *,
         client: Any | None = None,
         collection_name: str = COLLECTION_NAME,
+        embedding_function: Any | None = None,
+        chunk_size_words: int | None = None,
+        overlap_words: int = 0,
     ) -> None:
         self.client = client or chromadb.PersistentClient(path=str(persist_path))
+        self.chunk_size_words = chunk_size_words
+        self.overlap_words = overlap_words
         self.collection = self.client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
+            embedding_function=embedding_function,
         )
 
     def _sync_index(self, chunks: list[dict[str, str]]) -> None:
@@ -152,6 +161,9 @@ class ChromaPolicyRetriever:
                     "doc_id": chunk["doc_id"],
                     "title": chunk["title"],
                     "chunk_index": int(chunk["chunk_id"].rsplit("-", 1)[1]),
+                    "restricted": chunk.get("restricted", "false") == "true",
+                    "poisoned": chunk.get("poisoned", "false") == "true",
+                    "injection_style": chunk.get("injection_style", ""),
                 },
             )
             for chunk in chunks
@@ -171,6 +183,9 @@ class ChromaPolicyRetriever:
                     "doc_id": chunk["doc_id"],
                     "title": chunk["title"],
                     "chunk_index": int(chunk["chunk_id"].rsplit("-", 1)[1]),
+                    "restricted": chunk.get("restricted", "false") == "true",
+                    "poisoned": chunk.get("poisoned", "false") == "true",
+                    "injection_style": chunk.get("injection_style", ""),
                 },
             )
         ]
@@ -183,10 +198,27 @@ class ChromaPolicyRetriever:
                         "doc_id": chunk["doc_id"],
                         "title": chunk["title"],
                         "chunk_index": int(chunk["chunk_id"].rsplit("-", 1)[1]),
+                        "restricted": chunk.get("restricted", "false") == "true",
+                        "poisoned": chunk.get("poisoned", "false") == "true",
+                        "injection_style": chunk.get("injection_style", ""),
                     }
                     for chunk in changed
                 ],
             )
+
+    def index_documents(self, documents: list[dict[str, str]]) -> int:
+        """Chunk and persist documents, returning the number of indexed chunks."""
+        chunks = (
+            chunk_policy_documents(documents)
+            if self.chunk_size_words is None
+            else chunk_documents_by_words(
+                documents,
+                chunk_size=self.chunk_size_words,
+                overlap=self.overlap_words,
+            )
+        )
+        self._sync_index(chunks)
+        return len(chunks)
 
     def retrieve(
         self,
@@ -200,8 +232,15 @@ class ChromaPolicyRetriever:
         if limit < 1:
             return []
 
-        chunks = chunk_policy_documents(
-            load_policy_documents() if documents is None else documents
+        source_documents = load_policy_documents() if documents is None else documents
+        chunks = (
+            chunk_policy_documents(source_documents)
+            if self.chunk_size_words is None
+            else chunk_documents_by_words(
+                source_documents,
+                chunk_size=self.chunk_size_words,
+                overlap=self.overlap_words,
+            )
         )
         if not chunks:
             return []
@@ -229,6 +268,9 @@ class ChromaPolicyRetriever:
                     "doc_id": str(metadata["doc_id"]),
                     "title": str(metadata["title"]),
                     "text": safe_text,
+                    "restricted": bool(metadata.get("restricted", False)),
+                    "poisoned": bool(metadata.get("poisoned", False)),
+                    "injection_style": str(metadata.get("injection_style", "")),
                     "rank": rank,
                     "score": max(0.0, 1.0 - float(distance)),
                 }
@@ -250,3 +292,37 @@ def retrieve_policy_documents(
     if _default_retriever is None:
         _default_retriever = ChromaPolicyRetriever(settings.chroma_path)
     return _default_retriever.retrieve(query, limit=limit, hardened=hardened)
+
+
+def chunk_documents_by_words(
+    documents: list[dict[str, str]],
+    *,
+    chunk_size: int,
+    overlap: int,
+) -> list[dict[str, str]]:
+    """Chunk documents by whitespace tokens for comparable size experiments."""
+    if chunk_size < 1 or overlap < 0 or overlap >= chunk_size:
+        raise ValueError("Require chunk_size > overlap >= 0")
+    result: list[dict[str, str]] = []
+    step = chunk_size - overlap
+    for document in documents:
+        words = document["text"].split()
+        for start in range(0, len(words), step):
+            section = words[start : start + chunk_size]
+            if not section:
+                break
+            index = start // step
+            result.append(
+                {
+                    "chunk_id": f"{document['doc_id']}::chunk-{index:04d}",
+                    "doc_id": document["doc_id"],
+                    "title": document["title"],
+                    "text": " ".join(section),
+                    "restricted": document.get("restricted", "false"),
+                    "poisoned": document.get("poisoned", "false"),
+                    "injection_style": document.get("injection_style", ""),
+                }
+            )
+            if start + chunk_size >= len(words):
+                break
+    return result
